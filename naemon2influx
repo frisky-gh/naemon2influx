@@ -230,11 +230,13 @@ sub processDataline {
     my $data;
     foreach (@m) {
 	my $currtag = $tag;
-	s{(\w+)\[([-+*/.:\w]+)\]}{
-		$currtag .= ',' if $currtag;
-		$currtag .= "$1=$2";
-		$1;
-	}egx;
+	if( $Config{attributeparser} ){
+		s{(\w+)\[([-+*/.:\w]+)\]}{
+			$currtag .= ',' if $currtag;
+			$currtag .= "$1=$2";
+			$1;
+		}egx;
+	}
 	my $str = "$label,$currtag $_ $tsp";
 	$data .= "\n" if ($data);
         $data .= "$str";
