@@ -6,7 +6,7 @@ use Getopt::Long qw(:config no_ignore_case bundling);
 use File::Basename;
 use LWP::UserAgent;
 
-our $VERSION = '1.1.0';
+our $VERSION = '1.2.0';
 our %Config = (
     debug => 0,
 
@@ -43,11 +43,14 @@ our %Config = (
     max_suffix => ".max",
 
     # influxdb server settings
-    database => "",
-    username => "",
-    password => "",
+    database => "",  # v1 only
+    username => "",  # v1 only
+    password => "",  # v1 only
+    org      => "",  # v2 only
+    backet   => "",  # v2 only
+    token    => "",  # v2 only
     apiver   => 1,
-    output => "",
+    output   => "http://localhost:8086/",
 );
 
 our $OS_ERROR;
@@ -125,7 +128,7 @@ sub output_v1 {
     if  ($DRYRUN) {
         Log $LogLvl{HTTP}, sprintf "%s [%s] (%d)", $server_endpoint, "-0-", length($data);
 	print $data, "\n";
-        return;
+        return 1;
     }
 
     $req->content($data);
@@ -133,10 +136,12 @@ sub output_v1 {
     if ($resp->is_success) {
         my $message = $resp->decoded_content;
         Log $LogLvl{HTTP}, sprintf "%s [%s] (%d)", $server_endpoint, $resp->code, length($data);
+	return 1;
     }
     else {
         print STDERR "HTTP POST error code: ", $resp->code, "\n";
         print STDERR "HTTP POST error message: ", $resp->message, "\n", $data, "\n";
+	return undef;
     }
 }
 
@@ -144,20 +149,18 @@ sub output_v2 {
     my $data = shift;
     my $ua = LWP::UserAgent->new;
      
-    my $server_endpoint = $Config{output}."/api/v2/write?bucket=".$Config{database};
+    my $server_endpoint = $Config{output}."/api/v2/write?org=".$Config{org}."&bucket=".$Config{bucket};
     my $req = HTTP::Request->new(POST => $server_endpoint);
-    my $username = $Config{username};
-    my $password = $Config{password};
-    if( $password ne "" ){
-	$req->header("Authorization" => "Token $username:$password");
-    }
+    $req->header("Authorization" => "Token ".$Config{token});
+    $req->header("Content-Type"  => "text/plain; charset=utf-8");
+    $req->header("Accept"        => "application/json");
     Log $LogLvl{Output}, $data;
      
     # add POST data to HTTP request body
     if  ($DRYRUN) {
         Log $LogLvl{HTTP}, sprintf "%s [%s] (%d)", $server_endpoint, "-0-", length($data);
 	print $data, "\n";
-        return;
+        return 1;
     }
 
     $req->content($data);
@@ -165,22 +168,26 @@ sub output_v2 {
     if ($resp->is_success) {
         my $message = $resp->decoded_content;
         Log $LogLvl{HTTP}, sprintf "%s [%s] (%d)", $server_endpoint, $resp->code, length($data);
+	return 1;
     }
     else {
+        print "DEBUG3: ", $resp->content, "\n";
         print STDERR "HTTP POST error code: ", $resp->code, "\n";
         print STDERR "HTTP POST error message: ", $resp->message, "\n", $data, "\n";
+	return undef;
     }
 }
 
 sub output {
     my $data = shift;
-     
+
     if    ( $Config{apiver} == 1 ){
-	output_v1( $data );
+	return output_v1( $data );
     }elsif( $Config{apiver} == 2 ){
-	output_v2( $data );
+	return output_v2( $data );
     }else{
         Log $LogLvl{HTTP}, "Unknown protocol version (%d).", $Config{apiver};
+	return undef;
     }
 }
 
@@ -366,12 +373,23 @@ sub process {
         Log $LogLvl{Files}, "Renaming $filename to $datafile";
         rename $filename, $datafile or die "Renaming $filename: $!\n";    
     }
+
     my @data = processDatafile($datafile, $Config{perfdelimiter}, @perfformat);
+    my $ok = output( join "\n", @data );
+    unless ($ok) {
+	my ($h, $i);
+	open $h, '>>', "$filename.failed" and do {
+	    open $i, '<', $datafile and do {
+		while( <$i> ){ print $h $_; }
+		close $i;
+	    };
+	    close $h;
+	};
+    }
     unless ($PRESERVE || $DRYRUN) {
         Log $LogLvl{Files}, "Removing $datafile";
         unlink $datafile;
     }
-    output( join "\n", @data );
 }
 
 
