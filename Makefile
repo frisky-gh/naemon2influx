@@ -1,6 +1,6 @@
 NAME=		naemon2influx
 VERSION=	1.2
-RELEASE=	03
+RELEASE=	04
 
 RPM=		${HOME}/rpmbuild/RPMS/x86_64/${NAME}-${VERSION}-${RELEASE}.el7.x86_64.rpm
 DEB=		${NAME}-${VERSION}-${RELEASE}.deb
@@ -47,5 +47,5 @@ ${DEB}:	${DEBIAN} control naemon2influx.cfg naemon2influx.cfg.pod naemon2influx
 	@install -m 0640 naemon2influx.cfg ${BUILD}/etc/naemon
 	@pod2man naemon2influx | gzip > ${BUILD}/usr/share/man/man1/naemon2influx.1.gz
 	@pod2man --section 5 naemon2influx.cfg.pod | gzip > ${BUILD}/usr/share/man/man5/naemon2influx.cfg.5.gz
-	@dpkg-deb --build ${BUILD}
+	@dpkg-deb --build --root-owner-group ${BUILD}
 	@rm -rf ${BUILD}
