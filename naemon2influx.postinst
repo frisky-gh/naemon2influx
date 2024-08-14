@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+
+if getent paswd naemon >/dev/null 2>&1; then
+	chown naemon:naemon /etc/naemon/naemon2influx.cfg
+	chmod 0640 /etc/naemon/naemon2influx.cfg
+fi
+
+# End automatically added section
