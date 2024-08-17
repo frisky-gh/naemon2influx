@@ -2,55 +2,68 @@
 # vim:et:sw=4:ts=4
 
 use strict;
+use English;
 use Getopt::Long qw(:config no_ignore_case bundling);
 use File::Basename;
 use LWP::UserAgent;
 
-our $VERSION = '1.2.0';
-our %Config = (
+our $VERSION = '1.4.1';
+our %GlobalConfig = (
     debug => 0,
 
     # naemon perfdata settings
-    timefactor => 9,
+    perfdata => "/var/lib/naemon/service-perfdata",
+
+    # old way to specify performance line format
     separator => "",
     perfformat => "",
     perfdelimiter => "",
 
+    # new way to specify performance line format
+    perflineregexp => "",
+    time_is_captured_as => "time",
+    data_is_captured_as => "data",
+
     # feature enabling flags
-    attributeparser => 0,
+    autotagappender => 0,
+    enable_optional_values => 0,
+);
+
+our %ConditionalConfigTemplate = (
+    cond => undef,
 
     # influxdb measurement name settings
-    global_prefix => "",
+    global_prefix => undef,
     trimpattern => undef,
-    threshold_prefix => "",
-    threshold_suffix => "",
-    range_prefix => "",
-    range_suffix => "",
+    measurement => undef,
 
     # influxdb field key settings
-    timereplacement => "Time",
-    warn_lower_prefix => "",
-    warn_lower_suffix => ".warn_lower",
-    warn_upper_prefix => "",
-    warn_upper_suffix => ".warn_upper",
-    crit_lower_prefix => "",
-    crit_lower_suffix => ".crit_lower",
-    crit_upper_prefix => "",
-    crit_upper_suffix => ".crit_upper",
-    min_prefix => "",
-    min_suffix => ".min",
-    max_prefix => "",
-    max_suffix => ".max",
+    timereplacement => undef,
+    timefactor      => 9,
+    fieldkey        => undef,
 
     # influxdb server settings
-    database => "",  # v1 only
-    username => "",  # v1 only
-    password => "",  # v1 only
-    org      => "",  # v2 only
-    backet   => "",  # v2 only
-    token    => "",  # v2 only
-    apiver   => 1,
-    output   => "http://localhost:8086/",
+    output         => undef,
+    database       => undef,  # v1 only
+    username       => undef,  # v1 only
+    password       => undef,  # v1 only
+    apiver         => undef,
+    org            => undef,  # v2 only
+    bucket         => undef,  # v2 only
+    attibutebacket => undef,  # v2 only
+    token          => undef,  # v2 only
+);
+
+our @ConditionalConfig = (
+    {
+	%ConditionalConfigTemplate,
+	# overwrite by default values
+        "*cond"         => "1",
+	timereplacement => "Time",
+        timefactor      => 9,
+	output          => "http://localhost:8086/",
+	apiver          => 1,
+    },
 );
 
 our $OS_ERROR;
@@ -86,41 +99,89 @@ sub checkFile {
 sub Log {
     my ($lvl, $msg) = @_;
     my $prog = basename($0);
-    if ($Config{debug} & $lvl) { printf STDERR "[%3d] %s: %s\n", $lvl, $prog, $msg; };
+    if ($GlobalConfig{debug} & $lvl) { printf STDERR "[%3d] %s: %s\n", $lvl, $prog, $msg; };
 }
 
 sub cmdlineOverride {
     my ($debug, $perfdata, $timefactor) = @_;
-    $Config{debug} = $debug if ($debug);
-    $Config{perfdata} = $perfdata if ($perfdata);
-    $Config{timefactor} = $timefactor if ($timefactor);
+    $GlobalConfig{debug} = $debug if ($debug);
+    $GlobalConfig{perfdata} = $perfdata if ($perfdata);
+    $ConditionalConfig[0]{timefactor} = $timefactor if ($timefactor);
 }
 
 sub readConfig {
     my ($filename) = @_;
     open my $FH, '<', $filename or ## no critic (RequireBriefOpen)
         die "cannot open $filename: $OS_ERROR, stopped";
-    my ($key, $val);
+    my $curr_conditionalconfig = $ConditionalConfig[0];
     while (<$FH>) {
         next if /^\s*#/;        # skip commented lines
         s/^\s+//;               # removes leading whitespace
-        /^([^=]+)\s*=\s*(.*)$/x and do { # splits into key=val pairs
-            $key = $1;
-            $val = $2;
-            $key =~ s/\s+$//;   # removes trailing whitespace
-            $val =~ s/\s+$//;   # removes trailing whitespace
-            $Config{$key} = $val;
+        /^\s*([^=\s]+)\s*=\s*(|.*\S)\s*$/x and do { # splits into key=val pairs
+            my $key = $1;
+            my $val = $2;
+	    if    ( exists $GlobalConfig{$key} ){
+            	$GlobalConfig{$key} = $val;
+	    }elsif( exists $$curr_conditionalconfig{$key} ){
+            	$$curr_conditionalconfig{$key} = $val;
+	    }else{
+		Log $LogLvl{Settings}, "$filename:$.: unknown key '$key'";
+	    }
         };
+        /^\s*\*\s* if (
+	    (?:
+		\s+
+		(?:
+		    <\w+>|
+		    =~|!~|==|!=|<|>|eq|ne|gt|lt|not|and|or|\(|\) |
+		    "[^\\"\\x00-\\x1f]*" |
+		    [-+]?\d+(\.\d+)?
+	        )
+	    )+
+        )\s*$/x and do {
+	    my $cond = $1;
+	    $cond =~ s{
+		\s+
+		(?:
+		    <(\w+)>|
+		    ( =~|!~|==|!=|<|>|eq|ne|gt|lt|not|and|or|\(|\) ) |
+		    (" [^\\"\\x00-\\x1f]* ") |
+		    ([-+]?\d+(\.\d+)?)
+		)
+	    }{
+		if    ( $1 ne "" ){ # variable
+		    " \$var{\"$1\"}";
+		}elsif( $2 ne "" ){ # operator
+		    " $2";
+		}elsif( $3 ne "" ){ # text
+		    " $3";
+		}elsif( $4 ne "" ){ # number
+		    " $4";
+		}else{ undef; }
+	    }egx;
+	    $curr_conditionalconfig = {
+		   %ConditionalConfigTemplate,
+		   "*cond" => $cond,
+	    };
+	    push @ConditionalConfig, $curr_conditionalconfig;
+	}
     }
     close $FH or return "close failed for $filename: $OS_ERROR";
     Log $LogLvl{Files}, "Config:$filename";
 }
 
 sub output_v1 {
-    my $data = shift;
+    my ($config, $data_array) = @_;
+    my $data;
+    my $timefactor = 10 ** $$config{timefactor};
+    foreach my $i ( @$data_array ){
+	my ($time, $measurement, $fieldkey, $value) = @$i;
+	$time = $time * $timefactor;
+	$data .= "$measurement $fieldkey=$value $time\n";
+    }
     my $ua = LWP::UserAgent->new;
      
-    my $server_endpoint = $Config{output}."/write?db=".$Config{database}."&u=".$Config{username}."&p=".$Config{password};
+    my $server_endpoint = $$config{output}."/write?db=".$$config{database}."&u=".$$config{username}."&p=".$$config{password};
     my $req = HTTP::Request->new(POST => $server_endpoint);
     Log $LogLvl{Output}, $data;
      
@@ -139,19 +200,27 @@ sub output_v1 {
 	return 1;
     }
     else {
-        print STDERR "HTTP POST error code: ", $resp->code, "\n";
-        print STDERR "HTTP POST error message: ", $resp->message, "\n", $data, "\n";
+        Log $LogLvl{HTTP}, sprintf "HTTP POST error endpoint: %s", $server_endpoint;
+        Log $LogLvl{HTTP}, sprintf "HTTP POST error code: %s", $resp->code;
+        Log $LogLvl{HTTP}, sprintf "HTTP POST error message: %s", $resp->message;
 	return undef;
     }
 }
 
 sub output_v2 {
-    my $data = shift;
+    my ($config, $data_array) = @_;
+    my $data;
+    my $timefactor = 10 ** $$config{timefactor};
+    foreach my $i ( @$data_array ){
+	my ($time, $measurement, $fieldkey, $value) = @$i;
+	$time = $time * $timefactor;
+	$data .= "$measurement $fieldkey=$value $time\n";
+    }
     my $ua = LWP::UserAgent->new;
      
-    my $server_endpoint = $Config{output}."/api/v2/write?org=".$Config{org}."&bucket=".$Config{bucket};
+    my $server_endpoint = $$config{output}."/api/v2/write?org=".$$config{org}."&bucket=".$$config{bucket};
     my $req = HTTP::Request->new(POST => $server_endpoint);
-    $req->header("Authorization" => "Token ".$Config{token});
+    $req->header("Authorization" => "Token ".$$config{token});
     $req->header("Content-Type"  => "text/plain; charset=utf-8");
     $req->header("Accept"        => "application/json");
     Log $LogLvl{Output}, $data;
@@ -171,46 +240,72 @@ sub output_v2 {
 	return 1;
     }
     else {
-        print "DEBUG3: ", $resp->content, "\n";
-        print STDERR "HTTP POST error code: ", $resp->code, "\n";
-        print STDERR "HTTP POST error message: ", $resp->message, "\n", $data, "\n";
+        Log $LogLvl{HTTP}, sprintf "HTTP POST error endpoint: %s", $server_endpoint;
+        Log $LogLvl{HTTP}, sprintf "HTTP POST error code: %s", $resp->code;
+        Log $LogLvl{HTTP}, sprintf "HTTP POST error message: %s", $resp->message;
 	return undef;
     }
 }
 
 sub output {
-    my $data = shift;
+    my ( @data ) = @_;
+    
+    my %destname2config;
+    my %destname2data;
+    foreach my $data ( @data ){
+	my @metric = @{ $$data{"*metric"} };
+	foreach my $metric ( @metric ){
+	    my %curr_config;
+	    my %var = ( %$data, %$metric );
+	    foreach my $config ( @ConditionalConfig ){
+	        my $cond = eval $$config{"*cond"};
+	        next if $@;
+	        next unless $cond;
 
-    if    ( $Config{apiver} == 1 ){
-	return output_v1( $data );
-    }elsif( $Config{apiver} == 2 ){
-	return output_v2( $data );
-    }else{
-        Log $LogLvl{HTTP}, "Unknown protocol version (%d).", $Config{apiver};
-	return undef;
-    }
-}
+	        while( my ($k, $v) = each %$config ){ $curr_config{$k} = $v if defined $v; }
+	    }
 
-sub parseFormat {
-    my ($fmt, $delim) = @_;
-    my @c;
-    my $i = 0;
-    Log $LogLvl{Debug}, "Delim:$delim.";
-    foreach (split /$delim/, $fmt) {
-        if (/^tag=(.*)/) { 
-            $c[$i]{type} = "tag";
-            $c[$i]{tag} = $1;
-        }
-        elsif ($_) {
-            $c[$i]{type} = $_;
-        }
-        else {
-            $c[$i]{type} = "blank";
-        }
-        Log $LogLvl{Debug}, sprintf ("Column %d:%s%s.", $i, $c[$i]{type}, ($c[$i]{type} eq "tag") ? "=".$c[$i]{tag} : "");
-        $i++;
+	    my $destname = join " ", $curr_config{output}, $curr_config{apiver};
+	    if    ( $curr_config{apiver} == 1 ){
+	   	$destname = join " ", $destname,
+			$curr_config{database},
+			$curr_config{username},
+			$curr_config{password};
+	    }elsif( $curr_config{apiver} == 2 ){
+	   	$destname = join " ", $destname,
+			$curr_config{org},
+			$curr_config{bucket},
+			$curr_config{token};
+	    }else{ die; }
+
+	    unless( defined $destname2config{$destname} ){
+		$destname2config{$destname} = \%curr_config;
+	    }
+
+	    my $measurement = $curr_config{measurement};
+	    my $fieldkey    = $curr_config{fieldkey};
+	    $measurement =~ s{<(\w+)>}{ $var{$1}; }eg;
+	    $fieldkey    =~ s{<(\w+)>}{ $var{$1}; }eg;
+	    push @{$destname2data{$destname}}, [
+		$var{"*time"}, $measurement, $fieldkey, $var{"value"}
+	    ];
+	}
     }
-    return @c;
+
+    my $ok = 1;
+    while( my ($destname, $config) = each %destname2config ){
+	my $data = $destname2data{$destname};
+
+        if    ( $$config{apiver} == 1 ){
+	    output_v1( $config, $data ) or $ok = undef;
+        }elsif( $$config{apiver} == 2 ){
+	    output_v2( $config, $data ) or $ok = undef;
+        }else{
+            Log $LogLvl{HTTP}, "Unknown protocol version (%d).", $$config{apiver};
+	    $ok = undef;
+        }
+    }
+    return $ok;
 }
 
 sub processThreshold {
@@ -228,23 +323,24 @@ sub processThreshold {
     }
 }
 
-sub processMeasurements {
+sub processData {
     my ($raw) = @_;
     my @metric;
-    my @threshold;
-    my @range;
-    my $warn_lower_prefix = $Config{warn_lower_prefix};
-    my $warn_lower_suffix = $Config{warn_lower_suffix};
-    my $warn_upper_prefix = $Config{warn_upper_prefix};
-    my $warn_upper_suffix = $Config{warn_upper_suffix};
-    my $crit_lower_prefix = $Config{crit_lower_prefix};
-    my $crit_lower_suffix = $Config{crit_lower_suffix};
-    my $crit_upper_prefix = $Config{crit_upper_prefix};
-    my $crit_upper_suffix = $Config{crit_upper_suffix};
-    my $min_prefix = $Config{min_prefix};
-    my $min_suffix = $Config{min_suffix};
-    my $max_prefix = $Config{max_prefix};
-    my $max_suffix = $Config{max_suffix};
+
+    # performance data format:
+    #
+    #   'label'=value[UOM];[warn];[crit];[min];[max] 'label'=value[UOM];[warn];[crit];[min];[max] ...
+    #
+    # warn / crit format:
+    #
+    #   range           generate an alert if
+    #   10 		< 0 or > 10, (outside the range of {0 .. 10})
+    #   10: 		< 10, (outside {10 .. inf })
+    #   ~:10 		> 10, (outside the range of { -inf .. 10})
+    #   10:20 		< 10 or > 20, (outside the range of {10 .. 20})
+    #   @10:20 		>= 10 and <= 20, (inside the range of {10 .. 20})
+    #                   ( but, it drops information of inside / outside )
+    #   
     foreach (split /\s/, $raw) {
         my ($key,$val) = split /=/, $_, 2;
         my @data = split /;/, $val;
@@ -255,116 +351,70 @@ sub processMeasurements {
         $factor = 1000 if ($units eq "ms");
         $factor = 1000000 if ($units eq "us");
         $data[0] = $1/$factor;
-        $key = $Config{timereplacement} if ($key eq "time" && $Config{timereplacement});
-        push @metric, $key."=".$data[0];
+
+        push @metric, { label => $key, value => $data[0] };
+
+	next unless $GlobalConfig{enable_optional_values};
+
 	my ($warn_lower, $warn_upper) = processThreshold( $data[1] );
 	my ($crit_lower, $crit_upper) = processThreshold( $data[2] );
 	my $min = $data[3];
 	my $max = $data[4];
-	push @threshold, "$warn_lower_prefix$key$warn_lower_suffix=$warn_lower" if defined $warn_lower;
-	push @threshold, "$warn_upper_prefix$key$warn_upper_suffix=$warn_upper" if defined $warn_upper;
-	push @threshold, "$crit_lower_prefix$key$crit_lower_suffix=$crit_lower" if defined $crit_lower;
-	push @threshold, "$crit_upper_prefix$key$crit_upper_suffix=$crit_upper" if defined $crit_upper;
-	push @range, "$min_prefix$key$min_suffix=$min" if $min ne '';
-	push @range, "$max_prefix$key$max_suffix=$max" if $max ne '';
+
+        push @metric, { label => $key, name_of_optional_value => 'warn_lower', value => $warn_lower }
+		if $warn_lower ne '';
+        push @metric, { label => $key, name_of_optional_value => 'warn_upper', value => $warn_upper }
+		if $warn_upper ne '';
+        push @metric, { label => $key, name_of_optional_value => 'crit_lower', value => $crit_lower }
+		if $crit_lower ne '';
+        push @metric, { label => $key, name_of_optional_value => 'crit_upper', value => $crit_upper }
+		if $crit_upper ne '';
+        push @metric, { label => $key, name_of_optional_value => 'min', value => $min }
+		if $min ne '';
+        push @metric, { label => $key, name_of_optional_value => 'max', value => $max }
+		if $max ne '';
     }
-    return \@metric, \@threshold, \@range;
+    return @metric;
 }
 
 sub processDataline {
-    my ($l, $delim, @perfformat) = @_;
-    my $trimpattern = $Config{trimpattern} ? qr"$Config{trimpattern}" : undef;
-    my $tsp = "";
-    my $tag = "";
+    my ($l, $regexp, $time_is_captured_as, $data_is_captured_as) = @_;
 
-    my ($metric, $threshold, $range);
+    return unless $l =~ $regexp;
 
-    my $label;
-    my @datafield = split /$delim/, $l;
-    for( my $i = 0; $i < @datafield; $i++ ){
-	my $f = $datafield[$i];
-	my $type_of_column = lc $perfformat[$i]->{type};
-	my $tag_of_column  = lc $perfformat[$i]->{tag};
-	
-        next unless $type_of_column;
-        if ($type_of_column eq "label") {
-            $f =~ s/ /$Config{separator}/g;
-            $f =~ s/$trimpattern//g if $trimpattern;
-            $label .= "." if $label ne "";
-            $label .= $f;
-        }elsif ($type_of_column eq "tag") {
-            return if $tag_of_column eq "state" && $_ eq "UNKNOWN";
-            $f =~ s/ /$Config{separator}/g;
-            $tag .= "," if $tag ne "";
-	    $tag .= "$tag_of_column=$f";
-        }elsif ($type_of_column eq "time") {
-            $tsp = $f * (10 ** $Config{timefactor});
-        }elsif ($type_of_column eq "data") {
-    	    ($metric, $threshold, $range) = processMeasurements($f);
-        } 
-    }
+    my %d = %LAST_PAREN_MATCH;
+    my $time = $d{ $time_is_captured_as };
+    my $data = $d{ $data_is_captured_as };
+    my @metric = processData($data);
+    $d{"*time"}   = $time;
+    $d{"*metric"} = \@metric;
 
-    my $global_prefix = $Config{global_prefix};
-    my $threshold_prefix = $Config{threshold_prefix};
-    my $threshold_suffix = $Config{threshold_suffix};
-    my $range_prefix = $Config{range_prefix};
-    my $range_suffix = $Config{range_suffix};
-    my @data;
-    $global_prefix .= "." if $global_prefix ne '' && $global_prefix !~ m/\.$/;
-    foreach (@$metric) {
-	my $currtag = ",$tag" if $tag ne "";
-	if( $Config{attributeparser} ){
-		s{(\w+)\[([-+*/.:\w]+)\]}{
-			$currtag .= ",$1=$2";
-			$1;
-		}egx;
-	}
-        push @data, "$global_prefix$label$currtag $_ $tsp";
-    }
-    foreach (@$threshold) {
-	my $currtag = $tag;
-	if( $Config{attributeparser} ){
-		s{(\w+)\[([-+*/.:\w]+)\]}{
-			$currtag .= ',' if $currtag;
-			$currtag .= "$1=$2";
-			$1;
-		}egx;
-	}
-        push @data, "$global_prefix$threshold_prefix$label$threshold_suffix$currtag $_ $tsp";
-    }
-    foreach (@$range) {
-	my $currtag = $tag;
-	if( $Config{attributeparser} ){
-		s{(\w+)\[([-+*/.:\w]+)\]}{
-			$currtag .= ',' if $currtag;
-			$currtag .= "$1=$2";
-			$1;
-		}egx;
-	}
-        push @data, "$global_prefix$range_prefix$label$range_suffix$currtag $_ $tsp";
-    }
-    return join "\n", @data;
+    return \%d;
 }
 
 sub processDatafile {
-    my ($filename, $delim, @perfformat) = @_;
-    my @data;
+    my ($filename) = @_;
+    my @data_of_file;
+
+    my $perflineregexp = $GlobalConfig{perflineregexp};
+    my $regexp = qr/$perflineregexp/;
+    my $time_is_captured_as = $GlobalConfig{time_is_captured_as};
+    my $data_is_captured_as = $GlobalConfig{data_is_captured_as};
 
     open DATA, '<', $filename or die "$filename: $!\n";
     Log $LogLvl{Files}, "Reading $filename ...";
     while(<DATA>) {
         chomp;
         Log $LogLvl{Data}, "$_";
-        my $data = processDataline($_, $delim, @perfformat);
-    	push @data, $data if $data;
+        my $data_of_line = processDataline($_, $regexp, $time_is_captured_as, $data_is_captured_as);
+    	push @data_of_file, $data_of_line if $data_of_line;
     }
     close DATA;
-    return @data;
+    return @data_of_file;
 }
 
 sub process {
-    my ($filename) = @_;
-    my @perfformat = parseFormat($Config{perfformat}, $Config{perfdelimiter});
+    my $filename = $GlobalConfig{perfdata};
     checkFile("data", $filename);
 
     my $datafile = $filename;
@@ -374,8 +424,8 @@ sub process {
         rename $filename, $datafile or die "Renaming $filename: $!\n";    
     }
 
-    my @data = processDatafile($datafile, $Config{perfdelimiter}, @perfformat);
-    my $ok = output( join "\n", @data );
+    my @data = processDatafile($datafile);
+    my $ok = output( @data );
     unless ($ok) {
 	my ($h, $i);
 	open $h, '>>', "$filename.failed" and do {
@@ -392,7 +442,43 @@ sub process {
     }
 }
 
+sub convertOldWay2NewWay {
 
+    if( $GlobalConfig{perflineregexp} eq '' ){
+    	my $delimiter = $GlobalConfig{perfdelimiter};
+	my $format    = $GlobalConfig{perfformat};
+	my @format = split m"$delimiter", $format;
+	my @regexp;
+	my $labelnum = 1;
+
+	my @measurement;
+	push @measurement, $GlobalConfig{global_prefix} if $GlobalConfig{global_prefix} eq "";
+	my @tags;
+	foreach my $i ( @format ){
+	    if( $i =~ m"^tag=(.*)" ){
+	        push @regexp, "(?<tag_$1>.*)";
+		push @tags, "$1=<tag_$1>";
+	    }elsif( $i eq 'label' ){
+	        push @regexp, "(?<label_$labelnum>.*)";
+		push @measurement, "<label_$labelnum>";
+		$labelnum++;
+	    }elsif( $i eq 'time' ){
+	        push @regexp, '(?<time>.*)'
+	    }elsif( $i eq 'data' ){
+	        push @regexp, '(?<data>.*)'
+	    }elsif( $i eq 'blank' ){
+	        push @regexp, '(?:.*)'
+	    }else{ die "perfformat: $i, stopped"; }
+        }
+	my $regexp = "^" . join($delimiter, @regexp) . "\\s*\$";
+	$GlobalConfig{perflineregexp} = $regexp;
+
+	my $measurement = join $GlobalConfig{delimiter}, @measurement;
+	my $measurement_with_tags = join ",", $measurement, @tags;
+	$ConditionalConfig[0]{measurement} = $measurement_with_tags;
+	$ConditionalConfig[0]{fieldkey} = "<label>";
+    }
+}
 
 my $configfile = '/etc/naemon/naemon2influx.cfg';
 my $help;
@@ -416,15 +502,16 @@ if ($help) {
 }
 
 checkFile("config", $configfile);
-
 readConfig($configfile);
 cmdlineOverride($debug, $perfdata, $timefactor);
 
+convertOldWay2NewWay();
+
 Log ($LogLvl{Settings}, "--");
-Log ($LogLvl{Settings}, "$_=$Config{$_}") for (keys %Config);
+Log ($LogLvl{Settings}, "$_=$GlobalConfig{$_}") for (keys %GlobalConfig);
 Log ($LogLvl{Settings}, "--");
 
-process($Config{perfdata});
+process();
 
 =pod
 
