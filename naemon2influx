@@ -7,7 +7,7 @@ use Getopt::Long qw(:config no_ignore_case bundling);
 use File::Basename;
 use LWP::UserAgent;
 
-our $VERSION = '1.4.1';
+our $VERSION = '1.4.2';
 our %GlobalConfig = (
     debug => 0,
 
@@ -201,8 +201,8 @@ sub output_v1 {
     }
     else {
         Log $LogLvl{HTTP}, sprintf "HTTP POST error endpoint: %s", $server_endpoint;
-        Log $LogLvl{HTTP}, sprintf "HTTP POST error code: %s", $resp->code;
-        Log $LogLvl{HTTP}, sprintf "HTTP POST error message: %s", $resp->message;
+        Log $LogLvl{HTTP}, sprintf "HTTP POST error status line: %s", $resp->status_line;
+        Log $LogLvl{HTTP}, sprintf "HTTP POST error response body: %s", $resp->content;
 	return undef;
     }
 }
@@ -241,8 +241,8 @@ sub output_v2 {
     }
     else {
         Log $LogLvl{HTTP}, sprintf "HTTP POST error endpoint: %s", $server_endpoint;
-        Log $LogLvl{HTTP}, sprintf "HTTP POST error code: %s", $resp->code;
-        Log $LogLvl{HTTP}, sprintf "HTTP POST error message: %s", $resp->message;
+        Log $LogLvl{HTTP}, sprintf "HTTP POST error status line: %s", $resp->status_line;
+        Log $LogLvl{HTTP}, sprintf "HTTP POST error response body: %s", $resp->content;
 	return undef;
     }
 }
@@ -286,6 +286,7 @@ sub output {
 	    my $fieldkey    = $curr_config{fieldkey};
 	    $measurement =~ s{<(\w+)>}{ $var{$1}; }eg;
 	    $fieldkey    =~ s{<(\w+)>}{ $var{$1}; }eg;
+	    $fieldkey = $curr_config{timereplacement} if $fieldkey eq 'time';
 	    push @{$destname2data{$destname}}, [
 		$var{"*time"}, $measurement, $fieldkey, $var{"value"}
 	    ];

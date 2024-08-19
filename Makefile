@@ -1,6 +1,6 @@
 NAME=		naemon2influx
 VERSION=	1.4
-RELEASE=	1
+RELEASE=	2
 
 RPM=		${HOME}/rpmbuild/RPMS/x86_64/${NAME}-${VERSION}-${RELEASE}.el7.x86_64.rpm
 DEB=		${NAME}-${VERSION}-${RELEASE}.deb
